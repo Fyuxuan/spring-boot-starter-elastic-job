@@ -1,0 +1,3 @@
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+  com.yuxuan.elasticjob.spring.boot.RegistryCenterAutoConfiguration,\
+  com.yuxuan.elasticjob.spring.boot.ElasticJobAutoConfiguration
