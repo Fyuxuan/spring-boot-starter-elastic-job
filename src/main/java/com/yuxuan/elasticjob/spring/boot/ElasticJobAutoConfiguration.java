@@ -1,6 +1,11 @@
 package com.yuxuan.elasticjob.spring.boot;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
+import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -40,6 +45,8 @@ import com.dangdang.ddframe.job.lite.config.LiteJobConfiguration;
 import com.dangdang.ddframe.job.lite.spring.api.SpringJobScheduler;
 import com.dangdang.ddframe.job.reg.zookeeper.ZookeeperRegistryCenter;
 import com.yuxuan.elasticjob.spring.boot.annotaion.ElasticJobConfig;
+import com.yuxuan.elasticjob.spring.boot.job.db.TimeJob;
+import com.yuxuan.elasticjob.spring.boot.job.db.TimeJobDBStorage;
 
 
 /**
@@ -61,36 +68,85 @@ public class ElasticJobAutoConfiguration {
     private ApplicationContext applicationContext;
 
     @PostConstruct
-    public void init() {
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
-        System.out.println("beging====yuxuan====================");
+    public void init() throws SQLException, NoSuchFieldException, SecurityException, IllegalArgumentException, IllegalAccessException {
+        //获取数据中的作业记录
+        DataSource dataSource = getDataSource();
+        TimeJobDBStorage tjDb = new TimeJobDBStorage(dataSource);
+        List<TimeJob> timeJobList = tjDb.findTimeJob();
+        Map<String, TimeJob> timeJobMap = new HashMap<>();
+        for(TimeJob tj : timeJobList) {
+            timeJobMap.put(tj.getJobName(), tj);
+        }
         //获取作业任务
         Map<String, ElasticJob> elasticJobMap = applicationContext.getBeansOfType(ElasticJob.class);
+        
+        //循环保存作业
+        for(ElasticJob elasticJob : elasticJobMap.values()) {
+            Class<? extends ElasticJob> jobClass = elasticJob.getClass();
+            if(timeJobMap.get(jobClass.getName()) != null) {//数据库已存在
+                continue;
+            }
+          //获取作业任务注解配置
+            ElasticJobConfig elasticJobConfig = jobClass.getAnnotation(ElasticJobConfig.class);
+            if(null == elasticJobConfig) {
+                continue;
+            }
+            TimeJob timeJob = new TimeJob();
+            timeJob.setJobName(jobClass.getName());
+            timeJob.setShardingTotalCount(elasticJobConfig.shardingTotalCount());
+            timeJob.setCron(elasticJobConfig.cron());
+            timeJob.setFailover(elasticJobConfig.failover()?1:2);
+            timeJob.setMisfire(elasticJobConfig.misfire()?1:2);
+            timeJob.setJobExceptionHandler(elasticJobConfig.jobExceptionHandler());
+            timeJob.setExecutorServiceHandler(elasticJobConfig.jobExceptionHandler());
+            timeJob.setStreamingProcess(elasticJobConfig.streamingProcess()?1:2);
+            timeJob.setMonitorExecution(elasticJobConfig.monitorExecution()?1:2);
+            timeJob.setMonitorPort(elasticJobConfig.monitorPort());
+            timeJob.setMaxTimeDiffseconds(elasticJobConfig.maxTimeDiffSeconds());
+            timeJob.setReconcileIntervalMinutes(elasticJobConfig.reconcileIntervalMinutes());
+            timeJob.setEventTraceRdbDatasource(elasticJobConfig.eventTraceRdbDataSource());
+            timeJob.setOverwrite(elasticJobConfig.overwrite()?1:2);
+            timeJob.setDisabled(elasticJobConfig.disabled()?1:2);
+            timeJob.setStartedTimeoutMilliseconds(elasticJobConfig.startedTimeoutMilliseconds());
+            timeJob.setCompletedTimeoutMilliseconds(elasticJobConfig.completedTimeoutMilliseconds());
+            timeJob.setShardingItemParameters(elasticJobConfig.shardingItemParameters());
+            timeJob.setJobParameter(elasticJobConfig.jobParameter());
+            timeJob.setDescription(elasticJobConfig.description());
+            timeJob.setScriptCommandLine(elasticJobConfig.scriptCommandLine());
+            timeJob.setJobShardingStrategyClass(elasticJobConfig.jobShardingStrategyClass());
+            timeJob.setListener(elasticJobConfig.listener().getName());
+            timeJob.setDistributedListener(elasticJobConfig.distributedListener().getName());
+            tjDb.addTimeJob(timeJob);
+        }
+        
         //循环解析任务
         for (ElasticJob elasticJob : elasticJobMap.values()) {
+            
             Class<? extends ElasticJob> jobClass = elasticJob.getClass();
+            TimeJob timeJob = timeJobMap.get(jobClass.getName());
+            
             //获取作业任务注解配置
             ElasticJobConfig elasticJobConfig = jobClass.getAnnotation(ElasticJobConfig.class);
+            
+            //判断数据库是否存在
+            if(timeJob != null) {//数据库已存在
+                if(timeJob.getValid() == 2 || timeJob.getStatus()==2) { //被删除 或 被禁用
+                    continue;
+                }
+                System.out.println("before ===>"+elasticJobConfig.cron());
+                //通过反射把数据库的配置强制设值到注解配置中
+                InvocationHandler elasticJobConfigHandler = Proxy.getInvocationHandler(elasticJobConfig);
+                Field elasticJobConfigField = elasticJobConfigHandler.getClass().getDeclaredField("memberValues");
+                elasticJobConfigField.setAccessible(true);
+                Map memberValues = (Map)elasticJobConfigField.get(elasticJobConfigHandler);
+                memberValues.put("cron", timeJob.getCron());
+                System.out.println("before ===>"+elasticJobConfig.cron());
+            }
+            
+           
+            
+            
+            
             //获取作业类型
             JobType jobType = getJobType(elasticJob);
             //对脚本类型做特殊处理，具体原因请查看：com.dangdang.ddframe.job.executor.JobExecutorFactory.getJobExecutor
@@ -129,6 +185,20 @@ public class ElasticJobAutoConfiguration {
         }
         DataSource dataSource = (DataSource) applicationContext.getBean(eventTraceRdbDataSource);
         return new JobEventRdbConfiguration(dataSource);
+    }
+    
+    /**
+     * 获取数据源
+     * 
+     * @return
+     */
+    private DataSource getDataSource(){
+        String dataSourceStr = "dataSource";
+        if (!applicationContext.containsBean(dataSourceStr)) {
+            throw new RuntimeException("not exist datasource [" + dataSourceStr + "] !");
+        }
+        DataSource dataSource = (DataSource) applicationContext.getBean(dataSourceStr);
+        return dataSource;
     }
 
     /**
